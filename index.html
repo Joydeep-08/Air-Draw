@@ -17,6 +17,7 @@
     --cyan:#54e0d0;
     --pink:#ff5b93;
     --amber:#ffb454;
+    --violet:#7c8bff;
     --danger:#ff5d5d;
   }
   *{box-sizing:border-box;}
@@ -68,10 +69,10 @@
     color:var(--text-dim); font-size:14.5px; line-height:1.55; margin:0 0 20px;
   }
   .gesture-row{
-    display:flex; gap:10px; margin-bottom:22px;
+    display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:22px;
   }
   .gesture-chip{
-    flex:1; background:var(--surface-2); border:1px solid var(--line);
+    background:var(--surface-2); border:1px solid var(--line);
     border-radius:12px; padding:10px 8px; text-align:center;
   }
   .gesture-chip .emo{ font-size:20px; display:block; margin-bottom:6px; }
@@ -104,6 +105,7 @@
   #statusPill .dot{ width:8px; height:8px; border-radius:50%; background:var(--text-dim); transition:background .15s; }
   #statusPill.draw .dot{ background:var(--cyan); box-shadow:0 0 8px var(--cyan); }
   #statusPill.erase .dot{ background:var(--amber); box-shadow:0 0 8px var(--amber); }
+  #statusPill.grab .dot{ background:var(--violet); box-shadow:0 0 8px var(--violet); }
   #statusPill.idle .dot{ background:#4a4f5e; }
   #statusPill.nohand .dot{ background:var(--danger); }
 
@@ -153,7 +155,7 @@
 
   #hint{
     position:absolute; bottom:78px; left:50%; transform:translateX(-50%);
-    font-family:'IBM Plex Mono', monospace; font-size:11.5px; color:var(--text-dim);
+    font-family:'IBM Plex Mono', monospace; font-size:11px; color:var(--text-dim);
     background:rgba(22,25,34,0.6); padding:6px 12px; border-radius:100px;
     border:1px solid var(--line); white-space:nowrap;
     transition:opacity .4s;
@@ -163,7 +165,7 @@
     #dock{ gap:10px; padding:10px 12px; }
     #sizeRange{ width:56px; }
     .dockBtn{ font-size:10.5px; }
-    #hint{ font-size:10px; }
+    #hint{ font-size:9.5px; }
   }
 </style>
 </head>
@@ -179,7 +181,7 @@
     <div id="topRight">
       <button class="iconBtn" id="camToggle" title="Toggle camera visibility">👁</button>
     </div>
-    <div id="hint">point index finger to draw · open palm to erase · fist to pause</div>
+    <div id="hint">point = draw · palm = erase · fist = pause · pinch = move drawing</div>
     <div id="dock">
       <div class="swatches" id="swatches"></div>
       <div class="divider"></div>
@@ -199,6 +201,7 @@
         <div class="gesture-chip"><span class="emo">☝️</span><span class="lbl">point = draw</span></div>
         <div class="gesture-chip"><span class="emo">🖐️</span><span class="lbl">palm = erase</span></div>
         <div class="gesture-chip"><span class="emo">✊</span><span class="lbl">fist = pause</span></div>
+        <div class="gesture-chip"><span class="emo">🤏</span><span class="lbl">pinch = move</span></div>
       </div>
       <button id="startBtn">Turn on camera & start</button>
       <div id="loadingMsg">Loading hand‑tracking model…</div>
@@ -217,6 +220,15 @@
   const uiCanvas = document.getElementById('uiCanvas');
   const dctx = drawCanvas.getContext('2d');
   const uctx = uiCanvas.getContext('2d');
+
+  // offscreen canvas = the actual "art" — always drawn in its own untranslated
+  // coordinate space. drawCanvas is just history + in-progress stroke, re-composited
+  // every frame with the current pan offset. This is what makes pinch-to-move possible
+  // and also what removes the old per-segment overdraw ("beads on a string") artifact:
+  // a whole stroke is stroked as ONE continuous path, once, instead of many small
+  // overlapping segments each re-glowed on top of each other.
+  const historyCanvas = document.createElement('canvas');
+  const hctx = historyCanvas.getContext('2d');
 
   const startOverlay = document.getElementById('startOverlay');
   const startBtn = document.getElementById('startBtn');
@@ -250,15 +262,32 @@
 
   sizeRange.addEventListener('input', () => { brushSize = parseInt(sizeRange.value, 10); });
 
+  let cssW = window.innerWidth, cssH = window.innerHeight;
+
   function resize(){
-    const w = window.innerWidth, h = window.innerHeight;
-    [drawCanvas, uiCanvas].forEach(c => {
-      const prev = document.createElement('canvas');
-      prev.width = c.width; prev.height = c.height;
-      prev.getContext('2d').drawImage(c, 0, 0);
-      c.width = w; c.height = h;
-      if (c === drawCanvas) dctx.drawImage(prev, 0, 0, prev.width, prev.height, 0, 0, w, h);
+    const dpr = window.devicePixelRatio || 1;
+    cssW = window.innerWidth; cssH = window.innerHeight;
+
+    // preserve the committed artwork (historyCanvas) across a resize; drawCanvas
+    // itself is fully derived every frame so it needs no preservation.
+    let temp = null;
+    if (historyCanvas.width && historyCanvas.height){
+      temp = document.createElement('canvas');
+      temp.width = historyCanvas.width; temp.height = historyCanvas.height;
+      temp.getContext('2d').drawImage(historyCanvas, 0, 0);
+    }
+
+    [drawCanvas, uiCanvas, historyCanvas].forEach(c => {
+      c.width = Math.round(cssW * dpr);
+      c.height = Math.round(cssH * dpr);
     });
+
+    // draw in CSS-pixel units; the transform maps them to full native resolution
+    dctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    uctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    hctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    if (temp) hctx.drawImage(temp, 0, 0, temp.width, temp.height, 0, 0, cssW, cssH);
   }
   window.addEventListener('resize', resize);
   resize();
@@ -271,16 +300,18 @@
   });
 
   clearBtn.addEventListener('click', () => {
-    dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+    hctx.clearRect(0, 0, cssW, cssH);
+    currentStroke = [];
+    dctx.clearRect(0, 0, cssW, cssH);
   });
 
   saveBtn.addEventListener('click', () => {
     const out = document.createElement('canvas');
-    out.width = drawCanvas.width; out.height = drawCanvas.height;
+    out.width = historyCanvas.width; out.height = historyCanvas.height;
     const octx = out.getContext('2d');
     octx.fillStyle = '#0b0d12';
     octx.fillRect(0, 0, out.width, out.height);
-    octx.drawImage(drawCanvas, 0, 0);
+    octx.drawImage(historyCanvas, 0, 0);
     const a = document.createElement('a');
     a.download = 'airdraw.png';
     a.href = out.toDataURL('image/png');
@@ -297,20 +328,32 @@
     return dist(wrist, lm[tip]) > dist(wrist, lm[mcp]) * 1.15 &&
            dist(wrist, lm[tip]) > dist(wrist, lm[pip]) * 1.02;
   }
+  // thumb-tip to index-tip distance, normalized by hand size (wrist->middle-mcp)
+  // so the pinch threshold works regardless of how close the hand is to the camera.
+  function pinchAmount(lm){
+    const scale = dist(lm[0], lm[9]) || 1;
+    return dist(lm[4], lm[8]) / scale;
+  }
+  const PINCH_THRESHOLD = 0.32;
 
-  let lastMode = null;
-  let strokePoints = [];      // last few smoothed points, for curve fitting
   let nonDrawStreak = 0;
-  const HOLD_FRAMES = 5;      // ignore brief tracking flicker instead of breaking the line
-  const MIN_MOVE = 2.5;       // px — skip redrawing when the finger is basically still (kills the "blob" buildup)
+  const HOLD_FRAMES = 5;
+  const MIN_MOVE = 2.5;        // px in art-space — skip points that barely moved
+  const MAX_STROKE_POINTS = 140; // bake long strokes into history in chunks so redraw stays cheap
   let smoothX = null, smoothY = null;
-  const SMOOTH = 0.45;        // lower = smoother / more lag, higher = twitchier
+  const SMOOTH = 0.45;
   let pulseT = 0;
+
+  let currentStroke = [];      // points of the in-progress stroke, in art-space coords
+  let panX = 0, panY = 0;      // how far the whole drawing has been dragged
+  let isGrabbing = false;
+  let grabAnchorX = 0, grabAnchorY = 0;
+  let panAtGrabStartX = 0, panAtGrabStartY = 0;
 
   function setStatus(mode){
     statusPill.className = mode;
     statusText.textContent = {
-      draw: 'drawing', erase: 'erasing', idle: 'paused', hover: 'ready', nohand: 'no hand'
+      draw: 'drawing', erase: 'erasing', idle: 'paused', hover: 'ready', grab: 'moving', nohand: 'no hand'
     }[mode] || mode;
   }
 
@@ -323,60 +366,87 @@
     return `rgba(${r},${g},${b},${a})`;
   }
 
-  // Glowing, tapered neon stroke: soft outer halo -> saturated core -> hot white center.
-  function drawGlowSegment(p0, ctrl, p1, size, color){
-    dctx.lineJoin = 'round';
-    dctx.lineCap = 'round';
-    dctx.globalCompositeOperation = 'lighter';
-
-    const path = () => {
-      dctx.beginPath();
-      dctx.moveTo(p0.x, p0.y);
-      dctx.quadraticCurveTo(ctrl.x, ctrl.y, p1.x, p1.y);
-    };
-
-    // outer radiating halo
-    dctx.shadowColor = color;
-    dctx.shadowBlur = size * 2.6;
-    dctx.strokeStyle = rgba(color, 0.22);
-    dctx.lineWidth = size * 2.4;
-    path(); dctx.stroke();
-
-    // mid glow
-    dctx.shadowBlur = size * 1.4;
-    dctx.strokeStyle = rgba(color, 0.55);
-    dctx.lineWidth = size * 1.3;
-    path(); dctx.stroke();
-
-    // saturated core
-    dctx.shadowBlur = size * 0.6;
-    dctx.strokeStyle = color;
-    dctx.lineWidth = size * 0.85;
-    path(); dctx.stroke();
-
-    // hot white center
-    dctx.shadowBlur = 0;
-    dctx.strokeStyle = 'rgba(255,255,255,0.9)';
-    dctx.lineWidth = Math.max(1, size * 0.32);
-    path(); dctx.stroke();
-
-    dctx.globalCompositeOperation = 'source-over';
+  // Builds ONE continuous smooth curve through every point of the stroke
+  // (Catmull-Rom converted to cubic beziers). Stroking this once per glow
+  // layer — instead of stroking lots of tiny overlapping segments — is what
+  // kills the "circles / beads" artifact: there's no repeated additive
+  // overlap at the joints anymore.
+  function buildSmoothPath(ctx, pts){
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    if (pts.length === 2){
+      ctx.lineTo(pts[1].x, pts[1].y);
+      return;
+    }
+    for (let i = 0; i < pts.length - 1; i++){
+      const p0 = pts[i - 1] || pts[i];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[i + 2] || p2;
+      const c1 = { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 };
+      const c2 = { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 };
+      ctx.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, p2.x, p2.y);
+    }
   }
 
-  function drawGlowDot(p, size, color){
-    dctx.globalCompositeOperation = 'lighter';
-    dctx.shadowColor = color; dctx.shadowBlur = size * 2.6;
-    dctx.beginPath(); dctx.fillStyle = rgba(color, 0.25);
-    dctx.arc(p.x, p.y, size * 1.2, 0, Math.PI*2); dctx.fill();
+  // Glowing, glossy neon stroke: soft outer halo -> saturated core -> hot white center.
+  function strokeSmoothPath(ctx, pts, size, color){
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.globalCompositeOperation = 'lighter';
 
-    dctx.shadowBlur = size * 1.2;
-    dctx.beginPath(); dctx.fillStyle = color;
-    dctx.arc(p.x, p.y, size * 0.5, 0, Math.PI*2); dctx.fill();
+    ctx.shadowColor = color; ctx.shadowBlur = size * 2.6;
+    ctx.strokeStyle = rgba(color, 0.22); ctx.lineWidth = size * 2.4;
+    buildSmoothPath(ctx, pts); ctx.stroke();
 
-    dctx.shadowBlur = 0;
-    dctx.beginPath(); dctx.fillStyle = 'rgba(255,255,255,0.9)';
-    dctx.arc(p.x, p.y, size * 0.18, 0, Math.PI*2); dctx.fill();
-    dctx.globalCompositeOperation = 'source-over';
+    ctx.shadowBlur = size * 1.4;
+    ctx.strokeStyle = rgba(color, 0.55); ctx.lineWidth = size * 1.3;
+    buildSmoothPath(ctx, pts); ctx.stroke();
+
+    ctx.shadowBlur = size * 0.6;
+    ctx.strokeStyle = color; ctx.lineWidth = size * 0.85;
+    buildSmoothPath(ctx, pts); ctx.stroke();
+
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = Math.max(1, size * 0.32);
+    buildSmoothPath(ctx, pts); ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function drawGlowDot(ctx, p, size, color){
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.shadowColor = color; ctx.shadowBlur = size * 2.6;
+    ctx.beginPath(); ctx.fillStyle = rgba(color, 0.25);
+    ctx.arc(p.x, p.y, size * 1.2, 0, Math.PI*2); ctx.fill();
+
+    ctx.shadowBlur = size * 1.2;
+    ctx.beginPath(); ctx.fillStyle = color;
+    ctx.arc(p.x, p.y, size * 0.5, 0, Math.PI*2); ctx.fill();
+
+    ctx.shadowBlur = 0;
+    ctx.beginPath(); ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.arc(p.x, p.y, size * 0.18, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
+  function bakeStrokeToHistory(points){
+    if (points.length === 1) drawGlowDot(hctx, points[0], brushSize, currentColor);
+    else if (points.length > 1) strokeSmoothPath(hctx, points, brushSize, currentColor);
+  }
+  function commitStroke(){
+    bakeStrokeToHistory(currentStroke);
+    currentStroke = [];
+  }
+
+  function renderBase(){
+    dctx.clearRect(0, 0, cssW, cssH);
+    dctx.save();
+    dctx.translate(panX, panY);
+    dctx.drawImage(historyCanvas, 0, 0, cssW, cssH);
+    dctx.restore();
   }
 
   function onResults(results){
@@ -385,7 +455,9 @@
 
     if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0){
       setStatus('nohand');
-      strokePoints = []; lastMode = null;
+      isGrabbing = false;
+      if (currentStroke.length) commitStroke();
+      smoothX = smoothY = null;
       return;
     }
 
@@ -395,17 +467,26 @@
     const middleExt = fingerExtended(lm, 12, 10, 9);
     const ringExt   = fingerExtended(lm, 16, 14, 13);
     const pinkyExt  = fingerExtended(lm, 20, 18, 17);
+    const pinching  = pinchAmount(lm) < PINCH_THRESHOLD;
 
-    // mirror x since video is mirrored for a natural feel
-    const rawX = (1 - lm[8].x) * uiCanvas.width;
-    const rawY = lm[8].y * uiCanvas.height;
+    // mirror x since video is mirrored for a natural feel.
+    // while pinching, track the midpoint of thumb+index tips (the grab point);
+    // otherwise track the index fingertip (the pen tip).
+    const rawX = pinching
+      ? (1 - (lm[4].x + lm[8].x) / 2) * cssW
+      : (1 - lm[8].x) * cssW;
+    const rawY = pinching
+      ? ((lm[4].y + lm[8].y) / 2) * cssH
+      : lm[8].y * cssH;
 
     if (smoothX === null){ smoothX = rawX; smoothY = rawY; }
     smoothX += (rawX - smoothX) * SMOOTH;
     smoothY += (rawY - smoothY) * SMOOTH;
 
     let mode;
-    if (indexExt && !middleExt && !ringExt && !pinkyExt){
+    if (pinching){
+      mode = 'grab';
+    } else if (indexExt && !middleExt && !ringExt && !pinkyExt){
       mode = 'draw';
     } else if (indexExt && middleExt && ringExt && pinkyExt){
       mode = 'erase';
@@ -414,12 +495,36 @@
     } else {
       mode = 'hover';
     }
+
+    if (mode !== 'draw' && currentStroke.length) commitStroke();
+
+    if (mode === 'grab'){
+      if (!isGrabbing){
+        isGrabbing = true;
+        grabAnchorX = smoothX; grabAnchorY = smoothY;
+        panAtGrabStartX = panX; panAtGrabStartY = panY;
+      }
+      panX = panAtGrabStartX + (smoothX - grabAnchorX);
+      panY = panAtGrabStartY + (smoothY - grabAnchorY);
+    } else {
+      isGrabbing = false;
+    }
+
     setStatus(mode);
+    renderBase();
 
     // ---- glowing cursor, radiating pulse ----
-    const cursorColor = mode === 'draw' ? currentColor : (mode === 'erase' ? '#ffb454' : '#8a90a2');
+    const cursorColor = mode === 'draw' ? currentColor
+      : mode === 'erase' ? '#ffb454'
+      : mode === 'grab' ? '#7c8bff'
+      : '#8a90a2';
     const pulse = 1 + Math.sin(pulseT) * 0.12;
-    const ringR = (mode === 'erase' ? brushSize * 1.3 + 16 : (mode === 'draw' ? brushSize * 0.7 + 6 : 9)) * pulse;
+    const ringR = (
+      mode === 'erase' ? brushSize * 1.3 + 16
+      : mode === 'draw' ? brushSize * 0.7 + 6
+      : mode === 'grab' ? 20
+      : 9
+    ) * pulse;
 
     uctx.save();
     uctx.shadowColor = cursorColor;
@@ -429,7 +534,7 @@
     uctx.strokeStyle = cursorColor;
     uctx.lineWidth = 2.5;
     uctx.stroke();
-    if (mode === 'draw' || mode === 'erase'){
+    if (mode === 'draw' || mode === 'erase' || mode === 'grab'){
       uctx.beginPath();
       uctx.arc(smoothX, smoothY, 3, 0, Math.PI*2);
       uctx.fillStyle = '#fff';
@@ -437,41 +542,40 @@
     }
     uctx.restore();
 
-    // ---- drawing ----
+    // ---- draw / erase (in art-space, independent of current pan) ----
     if (mode === 'draw'){
       nonDrawStreak = 0;
-      const last = strokePoints[strokePoints.length - 1];
-      const moved = !last || Math.hypot(smoothX - last.x, smoothY - last.y) >= MIN_MOVE;
+      const artX = smoothX - panX, artY = smoothY - panY;
+      const last = currentStroke[currentStroke.length - 1];
+      const moved = !last || Math.hypot(artX - last.x, artY - last.y) >= MIN_MOVE;
 
       if (moved){
-        strokePoints.push({ x: smoothX, y: smoothY });
-        if (strokePoints.length > 3) strokePoints.shift();
-
-        if (strokePoints.length === 2){
-          const [a, b] = strokePoints;
-          drawGlowSegment(a, a, b, brushSize, currentColor);
-        } else if (strokePoints.length === 3){
-          const [p0, p1, p2] = strokePoints;
-          const midA = { x:(p0.x+p1.x)/2, y:(p0.y+p1.y)/2 };
-          const midB = { x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2 };
-          drawGlowSegment(midA, p1, midB, brushSize, currentColor);
+        currentStroke.push({ x: artX, y: artY });
+        if (currentStroke.length > MAX_STROKE_POINTS){
+          const tail = currentStroke.slice(-3);
+          bakeStrokeToHistory(currentStroke);
+          currentStroke = tail;
         }
       }
-      // a lone first point, or a paused finger, is buffered/skipped — never repainted in place
-    } else if (mode === 'erase'){
+
       dctx.save();
-      dctx.globalCompositeOperation = 'destination-out';
-      dctx.beginPath();
-      dctx.arc(smoothX, smoothY, brushSize * 1.3 + 16, 0, Math.PI*2);
-      dctx.fill();
+      dctx.translate(panX, panY);
+      if (currentStroke.length === 1) drawGlowDot(dctx, currentStroke[0], brushSize, currentColor);
+      else if (currentStroke.length > 1) strokeSmoothPath(dctx, currentStroke, brushSize, currentColor);
       dctx.restore();
-      strokePoints = [];
+    } else if (mode === 'erase'){
+      const artX = smoothX - panX, artY = smoothY - panY;
+      hctx.save();
+      hctx.globalCompositeOperation = 'destination-out';
+      hctx.beginPath();
+      hctx.arc(artX, artY, brushSize * 1.3 + 16, 0, Math.PI*2);
+      hctx.fill();
+      hctx.restore();
+      renderBase(); // reflect the erase immediately this frame
       nonDrawStreak = HOLD_FRAMES + 1;
     } else {
       nonDrawStreak++;
-      if (nonDrawStreak > HOLD_FRAMES) strokePoints = [];
     }
-    lastMode = mode;
   }
 
   let hands, camera;
