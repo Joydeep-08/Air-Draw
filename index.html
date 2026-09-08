@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>AirDraw — draw on air</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0b0d12;
+    --surface:#161922;
+    --surface-2:#1f232f;
+    --line: rgba(255,255,255,0.08);
+    --text:#eef0f4;
+    --text-dim:#8a90a2;
+    --cyan:#54e0d0;
+    --pink:#ff5b93;
+    --amber:#ffb454;
+    --danger:#ff5d5d;
+  }
+  *{box-sizing:border-box;}
+  html,body{
+    margin:0; padding:0; height:100%; overflow:hidden;
+    background:var(--bg); color:var(--text);
+    font-family:'Space Grotesk', sans-serif;
+    -webkit-user-select:none; user-select:none;
+  }
+  #stage{
+    position:relative; width:100vw; height:100vh; height:100dvh;
+    overflow:hidden;
+  }
+  video, canvas{
+    position:absolute; top:0; left:0; width:100%; height:100%;
+    object-fit:cover;
+  }
+  #video{ transform:scaleX(-1); filter:brightness(0.55) saturate(0.9); }
+  #drawCanvas{ z-index:2; }
+  #uiCanvas{ z-index:3; pointer-events:none; }
+
+  /* ---------- Start overlay ---------- */
+  #startOverlay{
+    position:absolute; inset:0; z-index:20;
+    display:flex; align-items:center; justify-content:center;
+    background:
+      radial-gradient(60% 60% at 50% 40%, rgba(84,224,208,0.10), transparent 70%),
+      var(--bg);
+  }
+  .start-card{
+    width:min(420px, 88vw);
+    background:var(--surface);
+    border:1px solid var(--line);
+    border-radius:20px;
+    padding:32px 28px 28px;
+    text-align:left;
+  }
+  .start-card .mark{
+    width:42px; height:42px; border-radius:11px;
+    background:linear-gradient(135deg, var(--cyan), var(--pink));
+    margin-bottom:18px;
+    display:flex; align-items:center; justify-content:center;
+    font-size:20px;
+  }
+  .start-card h1{
+    font-size:24px; font-weight:700; margin:0 0 8px; letter-spacing:-0.01em;
+  }
+  .start-card p{
+    color:var(--text-dim); font-size:14.5px; line-height:1.55; margin:0 0 20px;
+  }
+  .gesture-row{
+    display:flex; gap:10px; margin-bottom:22px;
+  }
+  .gesture-chip{
+    flex:1; background:var(--surface-2); border:1px solid var(--line);
+    border-radius:12px; padding:10px 8px; text-align:center;
+  }
+  .gesture-chip .emo{ font-size:20px; display:block; margin-bottom:6px; }
+  .gesture-chip .lbl{ font-size:11px; color:var(--text-dim); }
+  #startBtn{
+    width:100%; padding:14px; border:none; border-radius:12px;
+    background:var(--text); color:var(--bg);
+    font-family:inherit; font-weight:600; font-size:15px;
+    cursor:pointer;
+  }
+  #startBtn:active{ transform:scale(0.98); }
+  #startErr{
+    margin-top:14px; font-size:13px; color:var(--danger); display:none; line-height:1.5;
+  }
+  #loadingMsg{
+    margin-top:14px; font-size:13px; color:var(--text-dim); display:none;
+  }
+
+  /* ---------- HUD ---------- */
+  #hud{ position:absolute; inset:0; z-index:10; pointer-events:none; }
+  #statusPill{
+    position:absolute; top:16px; left:16px;
+    padding:8px 14px; border-radius:100px;
+    background:rgba(22,25,34,0.72); backdrop-filter:blur(10px);
+    border:1px solid var(--line);
+    font-family:'IBM Plex Mono', monospace; font-size:12px;
+    display:flex; align-items:center; gap:8px;
+    pointer-events:auto;
+  }
+  #statusPill .dot{ width:8px; height:8px; border-radius:50%; background:var(--text-dim); transition:background .15s; }
+  #statusPill.draw .dot{ background:var(--cyan); box-shadow:0 0 8px var(--cyan); }
+  #statusPill.erase .dot{ background:var(--amber); box-shadow:0 0 8px var(--amber); }
+  #statusPill.idle .dot{ background:#4a4f5e; }
+  #statusPill.nohand .dot{ background:var(--danger); }
+
+  #topRight{
+    position:absolute; top:16px; right:16px; display:flex; gap:8px; pointer-events:auto;
+  }
+  .iconBtn{
+    width:38px; height:38px; border-radius:10px;
+    background:rgba(22,25,34,0.72); backdrop-filter:blur(10px);
+    border:1px solid var(--line); color:var(--text);
+    display:flex; align-items:center; justify-content:center;
+    cursor:pointer; font-size:16px;
+  }
+  .iconBtn:active{ transform:scale(0.94); }
+
+  #dock{
+    position:absolute; left:50%; bottom:18px; transform:translateX(-50%);
+    display:flex; align-items:center; gap:14px;
+    background:rgba(22,25,34,0.78); backdrop-filter:blur(14px);
+    border:1px solid var(--line); border-radius:18px;
+    padding:12px 16px; pointer-events:auto;
+    max-width:94vw;
+  }
+  .swatches{ display:flex; gap:8px; }
+  .swatch{
+    width:26px; height:26px; border-radius:50%;
+    border:2px solid rgba(255,255,255,0.15);
+    cursor:pointer; padding:0;
+  }
+  .swatch.active{ border-color:#fff; transform:scale(1.12); }
+  .divider{ width:1px; height:28px; background:var(--line); }
+  #sizeRange{
+    -webkit-appearance:none; width:80px; height:4px; border-radius:2px;
+    background:var(--surface-2); outline:none;
+  }
+  #sizeRange::-webkit-slider-thumb{
+    -webkit-appearance:none; width:16px; height:16px; border-radius:50%;
+    background:var(--text); cursor:pointer;
+  }
+  .dockBtn{
+    background:none; border:none; color:var(--text-dim);
+    font-family:inherit; font-size:12.5px; cursor:pointer;
+    display:flex; flex-direction:column; align-items:center; gap:4px;
+  }
+  .dockBtn .ic{ font-size:16px; }
+  .dockBtn:active{ transform:scale(0.94); }
+
+  #hint{
+    position:absolute; bottom:78px; left:50%; transform:translateX(-50%);
+    font-family:'IBM Plex Mono', monospace; font-size:11.5px; color:var(--text-dim);
+    background:rgba(22,25,34,0.6); padding:6px 12px; border-radius:100px;
+    border:1px solid var(--line); white-space:nowrap;
+    transition:opacity .4s;
+  }
+
+  @media (max-width:480px){
+    #dock{ gap:10px; padding:10px 12px; }
+    #sizeRange{ width:56px; }
+    .dockBtn{ font-size:10.5px; }
+    #hint{ font-size:10px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="video" playsinline muted></video>
+  <canvas id="drawCanvas"></canvas>
+  <canvas id="uiCanvas"></canvas>
+
+  <div id="hud">
+    <div id="statusPill" class="nohand"><span class="dot"></span><span id="statusText">no hand</span></div>
+    <div id="topRight">
+      <button class="iconBtn" id="camToggle" title="Toggle camera visibility">👁</button>
+    </div>
+    <div id="hint">point index finger to draw · open palm to erase · fist to pause</div>
+    <div id="dock">
+      <div class="swatches" id="swatches"></div>
+      <div class="divider"></div>
+      <input type="range" id="sizeRange" min="6" max="70" value="22" />
+      <div class="divider"></div>
+      <button class="dockBtn" id="clearBtn"><span class="ic">✕</span>clear</button>
+      <button class="dockBtn" id="saveBtn"><span class="ic">⬇</span>save</button>
+    </div>
+  </div>
+
+  <div id="startOverlay">
+    <div class="start-card">
+      <div class="mark">✋</div>
+      <h1>AirDraw</h1>
+      <p>Draw in mid‑air using your finger like a pen. Your camera tracks your hand — nothing is recorded or uploaded, it all stays in this tab.</p>
+      <div class="gesture-row">
+        <div class="gesture-chip"><span class="emo">☝️</span><span class="lbl">point = draw</span></div>
+        <div class="gesture-chip"><span class="emo">🖐️</span><span class="lbl">palm = erase</span></div>
+        <div class="gesture-chip"><span class="emo">✊</span><span class="lbl">fist = pause</span></div>
+      </div>
+      <button id="startBtn">Turn on camera & start</button>
+      <div id="loadingMsg">Loading hand‑tracking model…</div>
+      <div id="startErr"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+
+<script>
+(function(){
+  const video = document.getElementById('video');
+  const drawCanvas = document.getElementById('drawCanvas');
+  const uiCanvas = document.getElementById('uiCanvas');
+  const dctx = drawCanvas.getContext('2d');
+  const uctx = uiCanvas.getContext('2d');
+
+  const startOverlay = document.getElementById('startOverlay');
+  const startBtn = document.getElementById('startBtn');
+  const startErr = document.getElementById('startErr');
+  const loadingMsg = document.getElementById('loadingMsg');
+  const statusPill = document.getElementById('statusPill');
+  const statusText = document.getElementById('statusText');
+  const hint = document.getElementById('hint');
+  const camToggle = document.getElementById('camToggle');
+  const clearBtn = document.getElementById('clearBtn');
+  const saveBtn = document.getElementById('saveBtn');
+  const sizeRange = document.getElementById('sizeRange');
+  const swatchWrap = document.getElementById('swatches');
+
+  const COLORS = ['#54e0d0', '#ff5b93', '#ffb454', '#7c8bff', '#4dff88', '#f4f4f6'];
+  let currentColor = COLORS[0];
+  let brushSize = parseInt(sizeRange.value, 10);
+
+  COLORS.forEach((c, i) => {
+    const b = document.createElement('button');
+    b.className = 'swatch' + (i === 0 ? ' active' : '');
+    b.style.background = c;
+    b.style.boxShadow = `0 0 10px ${c}, 0 0 2px ${c}`;
+    b.addEventListener('click', () => {
+      currentColor = c;
+      [...swatchWrap.children].forEach(el => el.classList.remove('active'));
+      b.classList.add('active');
+    });
+    swatchWrap.appendChild(b);
+  });
+
+  sizeRange.addEventListener('input', () => { brushSize = parseInt(sizeRange.value, 10); });
+
+  function resize(){
+    const w = window.innerWidth, h = window.innerHeight;
+    [drawCanvas, uiCanvas].forEach(c => {
+      const prev = document.createElement('canvas');
+      prev.width = c.width; prev.height = c.height;
+      prev.getContext('2d').drawImage(c, 0, 0);
+      c.width = w; c.height = h;
+      if (c === drawCanvas) dctx.drawImage(prev, 0, 0, prev.width, prev.height, 0, 0, w, h);
+    });
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  let camVisible = true;
+  camToggle.addEventListener('click', () => {
+    camVisible = !camVisible;
+    video.style.opacity = camVisible ? '1' : '0';
+    camToggle.style.opacity = camVisible ? '1' : '0.5';
+  });
+
+  clearBtn.addEventListener('click', () => {
+    dctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+  });
+
+  saveBtn.addEventListener('click', () => {
+    const out = document.createElement('canvas');
+    out.width = drawCanvas.width; out.height = drawCanvas.height;
+    const octx = out.getContext('2d');
+    octx.fillStyle = '#0b0d12';
+    octx.fillRect(0, 0, out.width, out.height);
+    octx.drawImage(drawCanvas, 0, 0);
+    const a = document.createElement('a');
+    a.download = 'airdraw.png';
+    a.href = out.toDataURL('image/png');
+    a.click();
+  });
+
+  // ---------- hand math ----------
+  function dist(a, b){
+    const dx = a.x - b.x, dy = a.y - b.y, dz = (a.z||0) - (b.z||0);
+    return Math.sqrt(dx*dx + dy*dy + dz*dz);
+  }
+  function fingerExtended(lm, tip, pip, mcp){
+    const wrist = lm[0];
+    return dist(wrist, lm[tip]) > dist(wrist, lm[mcp]) * 1.15 &&
+           dist(wrist, lm[tip]) > dist(wrist, lm[pip]) * 1.02;
+  }
+
+  let lastMode = null;
+  let strokePoints = [];      // last few smoothed points, for curve fitting
+  let nonDrawStreak = 0;
+  const HOLD_FRAMES = 5;      // ignore brief tracking flicker instead of breaking the line
+  const MIN_MOVE = 2.5;       // px — skip redrawing when the finger is basically still (kills the "blob" buildup)
+  let smoothX = null, smoothY = null;
+  const SMOOTH = 0.45;        // lower = smoother / more lag, higher = twitchier
+  let pulseT = 0;
+
+  function setStatus(mode){
+    statusPill.className = mode;
+    statusText.textContent = {
+      draw: 'drawing', erase: 'erasing', idle: 'paused', hover: 'ready', nohand: 'no hand'
+    }[mode] || mode;
+  }
+
+  function hexToRgb(hex){
+    const n = parseInt(hex.replace('#',''), 16);
+    return { r:(n>>16)&255, g:(n>>8)&255, b:n&255 };
+  }
+  function rgba(hex, a){
+    const {r,g,b} = hexToRgb(hex);
+    return `rgba(${r},${g},${b},${a})`;
+  }
+
+  // Glowing, tapered neon stroke: soft outer halo -> saturated core -> hot white center.
+  function drawGlowSegment(p0, ctrl, p1, size, color){
+    dctx.lineJoin = 'round';
+    dctx.lineCap = 'round';
+    dctx.globalCompositeOperation = 'lighter';
+
+    const path = () => {
+      dctx.beginPath();
+      dctx.moveTo(p0.x, p0.y);
+      dctx.quadraticCurveTo(ctrl.x, ctrl.y, p1.x, p1.y);
+    };
+
+    // outer radiating halo
+    dctx.shadowColor = color;
+    dctx.shadowBlur = size * 2.6;
+    dctx.strokeStyle = rgba(color, 0.22);
+    dctx.lineWidth = size * 2.4;
+    path(); dctx.stroke();
+
+    // mid glow
+    dctx.shadowBlur = size * 1.4;
+    dctx.strokeStyle = rgba(color, 0.55);
+    dctx.lineWidth = size * 1.3;
+    path(); dctx.stroke();
+
+    // saturated core
+    dctx.shadowBlur = size * 0.6;
+    dctx.strokeStyle = color;
+    dctx.lineWidth = size * 0.85;
+    path(); dctx.stroke();
+
+    // hot white center
+    dctx.shadowBlur = 0;
+    dctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    dctx.lineWidth = Math.max(1, size * 0.32);
+    path(); dctx.stroke();
+
+    dctx.globalCompositeOperation = 'source-over';
+  }
+
+  function drawGlowDot(p, size, color){
+    dctx.globalCompositeOperation = 'lighter';
+    dctx.shadowColor = color; dctx.shadowBlur = size * 2.6;
+    dctx.beginPath(); dctx.fillStyle = rgba(color, 0.25);
+    dctx.arc(p.x, p.y, size * 1.2, 0, Math.PI*2); dctx.fill();
+
+    dctx.shadowBlur = size * 1.2;
+    dctx.beginPath(); dctx.fillStyle = color;
+    dctx.arc(p.x, p.y, size * 0.5, 0, Math.PI*2); dctx.fill();
+
+    dctx.shadowBlur = 0;
+    dctx.beginPath(); dctx.fillStyle = 'rgba(255,255,255,0.9)';
+    dctx.arc(p.x, p.y, size * 0.18, 0, Math.PI*2); dctx.fill();
+    dctx.globalCompositeOperation = 'source-over';
+  }
+
+  function onResults(results){
+    uctx.clearRect(0, 0, uiCanvas.width, uiCanvas.height);
+    pulseT += 0.12;
+
+    if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0){
+      setStatus('nohand');
+      strokePoints = []; lastMode = null;
+      return;
+    }
+
+    const lm = results.multiHandLandmarks[0];
+
+    const indexExt  = fingerExtended(lm, 8, 6, 5);
+    const middleExt = fingerExtended(lm, 12, 10, 9);
+    const ringExt   = fingerExtended(lm, 16, 14, 13);
+    const pinkyExt  = fingerExtended(lm, 20, 18, 17);
+
+    // mirror x since video is mirrored for a natural feel
+    const rawX = (1 - lm[8].x) * uiCanvas.width;
+    const rawY = lm[8].y * uiCanvas.height;
+
+    if (smoothX === null){ smoothX = rawX; smoothY = rawY; }
+    smoothX += (rawX - smoothX) * SMOOTH;
+    smoothY += (rawY - smoothY) * SMOOTH;
+
+    let mode;
+    if (indexExt && !middleExt && !ringExt && !pinkyExt){
+      mode = 'draw';
+    } else if (indexExt && middleExt && ringExt && pinkyExt){
+      mode = 'erase';
+    } else if (!indexExt && !middleExt && !ringExt && !pinkyExt){
+      mode = 'idle';
+    } else {
+      mode = 'hover';
+    }
+    setStatus(mode);
+
+    // ---- glowing cursor, radiating pulse ----
+    const cursorColor = mode === 'draw' ? currentColor : (mode === 'erase' ? '#ffb454' : '#8a90a2');
+    const pulse = 1 + Math.sin(pulseT) * 0.12;
+    const ringR = (mode === 'erase' ? brushSize * 1.3 + 16 : (mode === 'draw' ? brushSize * 0.7 + 6 : 9)) * pulse;
+
+    uctx.save();
+    uctx.shadowColor = cursorColor;
+    uctx.shadowBlur = mode === 'idle' ? 0 : 18;
+    uctx.beginPath();
+    uctx.arc(smoothX, smoothY, ringR, 0, Math.PI*2);
+    uctx.strokeStyle = cursorColor;
+    uctx.lineWidth = 2.5;
+    uctx.stroke();
+    if (mode === 'draw' || mode === 'erase'){
+      uctx.beginPath();
+      uctx.arc(smoothX, smoothY, 3, 0, Math.PI*2);
+      uctx.fillStyle = '#fff';
+      uctx.fill();
+    }
+    uctx.restore();
+
+    // ---- drawing ----
+    if (mode === 'draw'){
+      nonDrawStreak = 0;
+      const last = strokePoints[strokePoints.length - 1];
+      const moved = !last || Math.hypot(smoothX - last.x, smoothY - last.y) >= MIN_MOVE;
+
+      if (moved){
+        strokePoints.push({ x: smoothX, y: smoothY });
+        if (strokePoints.length > 3) strokePoints.shift();
+
+        if (strokePoints.length === 2){
+          const [a, b] = strokePoints;
+          drawGlowSegment(a, a, b, brushSize, currentColor);
+        } else if (strokePoints.length === 3){
+          const [p0, p1, p2] = strokePoints;
+          const midA = { x:(p0.x+p1.x)/2, y:(p0.y+p1.y)/2 };
+          const midB = { x:(p1.x+p2.x)/2, y:(p1.y+p2.y)/2 };
+          drawGlowSegment(midA, p1, midB, brushSize, currentColor);
+        }
+      }
+      // a lone first point, or a paused finger, is buffered/skipped — never repainted in place
+    } else if (mode === 'erase'){
+      dctx.save();
+      dctx.globalCompositeOperation = 'destination-out';
+      dctx.beginPath();
+      dctx.arc(smoothX, smoothY, brushSize * 1.3 + 16, 0, Math.PI*2);
+      dctx.fill();
+      dctx.restore();
+      strokePoints = [];
+      nonDrawStreak = HOLD_FRAMES + 1;
+    } else {
+      nonDrawStreak++;
+      if (nonDrawStreak > HOLD_FRAMES) strokePoints = [];
+    }
+    lastMode = mode;
+  }
+
+  let hands, camera;
+
+  async function start(){
+    startBtn.disabled = true;
+    startBtn.textContent = 'Requesting camera…';
+    startErr.style.display = 'none';
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+      video.srcObject = stream;
+      await video.play();
+    } catch(e){
+      startErr.textContent = 'Could not access your camera. Check your browser/site permissions and try again.';
+      startErr.style.display = 'block';
+      startBtn.disabled = false;
+      startBtn.textContent = 'Turn on camera & start';
+      return;
+    }
+
+    loadingMsg.style.display = 'block';
+
+    try {
+      hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 0,
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.5
+      });
+      hands.onResults(onResults);
+
+      camera = new Camera(video, {
+        onFrame: async () => { await hands.send({ image: video }); },
+        width: 640,
+        height: 480
+      });
+      await camera.start();
+    } catch(e){
+      startErr.textContent = 'Hand-tracking model failed to load. Check your connection and try again.';
+      startErr.style.display = 'block';
+      startBtn.disabled = false;
+      startBtn.textContent = 'Turn on camera & start';
+      loadingMsg.style.display = 'none';
+      return;
+    }
+
+    startOverlay.style.display = 'none';
+    setTimeout(() => { hint.style.opacity = '0'; }, 6000);
+  }
+
+  startBtn.addEventListener('click', start);
+})();
+</script>
+</body>
+</html>
