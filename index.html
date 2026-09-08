@@ -334,7 +334,13 @@
     const scale = dist(lm[0], lm[9]) || 1;
     return dist(lm[4], lm[8]) / scale;
   }
-  const PINCH_THRESHOLD = 0.32;
+  // Hysteresis band instead of a single threshold: once pinching starts it takes a
+  // bigger release to end it, and vice versa. This stops noisy landmark jitter from
+  // flickering pinch on/off many times a second (which was the real cause of the
+  // drawing "jumping away" while trying to move it — see isPinching usage below).
+  const PINCH_ENTER = 0.30;
+  const PINCH_EXIT  = 0.38;
+  let isPinching = false;
 
   let nonDrawStreak = 0;
   const HOLD_FRAMES = 5;
@@ -456,6 +462,7 @@
     if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0){
       setStatus('nohand');
       isGrabbing = false;
+      isPinching = false;
       if (currentStroke.length) commitStroke();
       smoothX = smoothY = null;
       return;
@@ -467,31 +474,38 @@
     const middleExt = fingerExtended(lm, 12, 10, 9);
     const ringExt   = fingerExtended(lm, 16, 14, 13);
     const pinkyExt  = fingerExtended(lm, 20, 18, 17);
-    const pinching  = pinchAmount(lm) < PINCH_THRESHOLD;
 
-    // mirror x since video is mirrored for a natural feel.
-    // while pinching, track the midpoint of thumb+index tips (the grab point);
-    // otherwise track the index fingertip (the pen tip).
-    const rawX = pinching
-      ? (1 - (lm[4].x + lm[8].x) / 2) * cssW
-      : (1 - lm[8].x) * cssW;
-    const rawY = pinching
-      ? ((lm[4].y + lm[8].y) / 2) * cssH
-      : lm[8].y * cssH;
+    // Hysteresis: only flip the pinch state when we cross the far side of the
+    // band, so borderline readings near the old single threshold don't toggle
+    // grab mode on and off every frame.
+    const amt = pinchAmount(lm);
+    if (!isPinching && amt < PINCH_ENTER) isPinching = true;
+    else if (isPinching && amt > PINCH_EXIT) isPinching = false;
+    const pinching = isPinching;
+
+    // Always track the index fingertip — do NOT switch the tracked landmark
+    // when entering/exiting pinch. Switching points was what caused the cursor
+    // (and therefore the pan delta) to jump several pixels on every pinch
+    // flicker, which snapped the whole drawing far off-screen almost instantly.
+    const rawX = (1 - lm[8].x) * cssW;
+    const rawY = lm[8].y * cssH;
 
     if (smoothX === null){ smoothX = rawX; smoothY = rawY; }
     smoothX += (rawX - smoothX) * SMOOTH;
     smoothY += (rawY - smoothY) * SMOOTH;
 
+    // Fist (all fingers curled) is checked before pinch: closing a fist often
+    // brings thumb and index close enough to also read as a pinch, which used
+    // to hijack fist into "grab" mode and silently pan the drawing away.
     let mode;
-    if (pinching){
+    if (!indexExt && !middleExt && !ringExt && !pinkyExt){
+      mode = 'idle';
+    } else if (pinching){
       mode = 'grab';
     } else if (indexExt && !middleExt && !ringExt && !pinkyExt){
       mode = 'draw';
     } else if (indexExt && middleExt && ringExt && pinkyExt){
       mode = 'erase';
-    } else if (!indexExt && !middleExt && !ringExt && !pinkyExt){
-      mode = 'idle';
     } else {
       mode = 'hover';
     }
